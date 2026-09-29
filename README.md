@@ -20,6 +20,7 @@
   | kind | routes | query | shows |
   |---|---|---|---|
   | `deepseek` | `deepseek-official`, `deepseek` | `GET {baseURL}/user/balance` | total / granted / topped-up balance |
+  | `deepseek-account` | `deepseek-account` (dsh ≥ 0.1.7) | `GET {platformOrigin}/api/v0/users/get_user_summary` | account wallet balance (recharge + bonus merged; **reads the harness's built-in DeepSeek Account sign-in**, zero config). The harness composes this route unconditionally, so the card is **omitted while no sign-in is stored** — it appears on the next poll after you sign in |
   | `moonshot` | `moonshotai-cn`, `moonshotai` | `GET {baseURL}/users/me/balance` | available / voucher / cash balance |
   | `kimi-coding` | `kimi-coding` | `GET {baseURL}/v1/usages` | weekly usage + rate-limit windows, reset countdown |
   | `openrouter` | `openrouter` | `GET {origin}/api/v1/credits` | credits used / total |
@@ -200,6 +201,17 @@ dsh plugin --profile web add dsh-provider-usage@latest
 ```
 
 Then restart `dsh web` and refresh the page. If the release you want was published very recently, your profile's supply-chain cooldown (`minimumReleaseAge`) may silently keep the older version — pin the exact version instead (`dsh plugin --profile web add dsh-provider-usage@0.3.10`) and dsh will exempt it automatically. The version badge in the panel header confirms which release is actually loaded.
+
+## Host compatibility
+
+The host packages this plugin imports (`@deepseek-ai/dsh-credentials`, `-settings`, `-typert-protocol`, `-launch-environment`) are not installed from npm: a profile resolves them through `$DSH_HOME/profiles/node_modules` into the running dsh's own single copy. dsh's peer gate compares those declared ranges against the runtime version, so a narrow range such as `^0.1.2-alpha.3` makes every dsh minor release skip the plugin with `skipping profile bundle`.
+
+This plugin therefore declares an **open lower bound** — `>=0.1.2-alpha.3` — which the gate accepts for any runtime, prereleases included. The field itself stays: a peer *name* is also what makes dsh's loader bind that import to the harness's copy instead of to whatever the profile's `node_modules` happens to hold.
+
+Two consequences worth knowing:
+
+- A dsh release that renames a seam this plugin reads is **not** blocked; it degrades instead, and `provider-usage: this dsh provides no …` in the harness log names what is missing (`src/host-seams.ts`). The [`compat`](.github/workflows/compat.yml) workflow replays the gate and drives a live `usage/list` against the `latest` and `next` release lines daily, so drift surfaces in CI rather than in your panel.
+- `npm install` is stricter than the gate: standard semver never matches a prerelease (`0.2.0-rc.1`) against an open range, so npm answers `ERESOLVE`. Install through dsh — `dsh plugin --profile web add …` uses pnpm, which is what the harness itself installs plugins with.
 
 ## Configuration
 

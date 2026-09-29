@@ -20,6 +20,7 @@
   | kind | 路由 | 查询接口 | 展示内容 |
   |---|---|---|---|
   | `deepseek` | `deepseek-official`、`deepseek` | `GET {baseURL}/user/balance` | 余额（含赠送/充值明细） |
+  | `deepseek-account` | `deepseek-account`（dsh ≥ 0.1.7） | `GET {platformOrigin}/api/v0/users/get_user_summary` | 账号钱包余额（充值 + 赠送合并展示，**读取 harness 内置 DeepSeek 账号登录**，无需配置）。该路由由 harness 无条件组合，因此**未登录时不显示该卡片**，登录后下一次轮询自动出现 |
   | `moonshot` | `moonshotai-cn`、`moonshotai` | `GET {baseURL}/users/me/balance` | 可用/代金券/现金余额 |
   | `kimi-coding` | `kimi-coding` | `GET {baseURL}/v1/usages` | 每周用量及各限速窗口，含重置倒计时 |
   | `openrouter` | `openrouter` | `GET {origin}/api/v1/credits` | credit 已用/总额 |
@@ -200,6 +201,17 @@ dsh plugin --profile web add dsh-provider-usage@latest
 ```
 
 然后重启 `dsh web` 并刷新页面。如果目标版本刚发布不久，profile 的供应链冷静期（`minimumReleaseAge`）可能会静默停留在旧版——这时指定精确版本号（如 `dsh plugin --profile web add dsh-provider-usage@0.3.10`），dsh 会自动豁免该版本。面板标题旁的版本徽章可以确认实际加载的版本。
+
+## 宿主兼容性
+
+本插件导入的宿主包（`@deepseek-ai/dsh-credentials`、`-settings`、`-typert-protocol`、`-launch-environment`）不是从 npm 装的：profile 会通过 `$DSH_HOME/profiles/node_modules` 把它们解析到**运行中 dsh 的那一份**上。dsh 的 peer 闸门拿这些声明范围与运行时版本比对，所以像 `^0.1.2-alpha.3` 这样的窄范围会让 dsh 每抬一次 minor 就以 `skipping profile bundle` 跳过插件。
+
+因此本插件声明**开放下界** `>=0.1.2-alpha.3`：任何运行时（含预发布）都能通过闸门。但字段本身保留——peer 的**名字**同时是 dsh 加载器把该导入绑定到宿主那一份（而不是 profile `node_modules` 里碰巧存在的另一份）的依据。
+
+两点需要知道：
+
+- 如果某个 dsh 版本改掉了插件读取的接缝，**不会**被拦下，而是降级运行，并在 harness 日志里打出 `provider-usage: this dsh provides no …` 指明缺了什么（见 `src/host-seams.ts`）。[`compat`](.github/workflows/compat.yml) 工作流每天对 `latest` 与 `next` 两条发布线回放闸门并跑一次真实 `usage/list`，所以漂移会在 CI 里暴露，而不是在你的面板里。
+- `npm install` 比闸门严格：标准 semver 不会用开放范围匹配预发布版本（`0.2.0-rc.1`），npm 会报 `ERESOLVE`。请通过 dsh 安装——`dsh plugin --profile web add …` 走的是 pnpm，也是 harness 自己安装插件的方式。
 
 ## 配置说明
 
