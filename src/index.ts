@@ -11,7 +11,8 @@
  * - `deepseek-account` → GET {platformOrigin}/api/v0/users/get_user_summary
  *                     (DSH 账号余额, x-dsh-auth-token grant; 见 deepseek-account.ts,
  *                     dsh ≥ 0.1.7 的 `deepseek-account` 路由)
- * - `kimi-coding`    → GET {baseURL}/v1/usages                 (订阅配额, weekly / 5h windows)
+ * - `kimi-coding`    → GET {baseURL}/v1/usages                 (订阅配额: 5h/weekly/monthly 窗口;
+ *                     会员到期后接口回 `{}`，卡片如实报告“无生效套餐”而不是留空)
  * - `moonshot`       → GET {baseURL}/users/me/balance          (开放平台余额)
  * - `openrouter`     → GET {origin}/api/v1/credits             (credit 总额与已用量)
  * - `github-copilot` → GET api.github.com/copilot_internal/user (订阅配额快照, OAuth token)
@@ -59,7 +60,8 @@ import {
   type OpenAiCodexGrant,
   type OpenAiCodexGrantStore,
 } from './openai-codex.ts'
-import { orderUsageRows, toNumber, toResetAt, usageRow, type BalanceRow, type ProviderUsageView, type UsageListResult, type UsageRow } from './wire.ts'
+import { orderUsageRows, toNumber, toResetAt, NoActiveSubscriptionError, type BalanceRow, type ProviderUsageView, type UsageListResult, type UsageRow } from './wire.ts'
+import { parseKimiUsages } from './kimi.ts'
 import {
   ACCESS_KEY_REFS,
   AGENT_PLAN_ACTIONS,
@@ -289,46 +291,6 @@ function ownsCredentials(kind: ProviderKind): boolean {
 }
 
 /* ------------------------------------------------------------------ *
- * Response parsing helpers
- * ------------------------------------------------------------------ */
-
-/** Parse the Kimi Code `/v1/usages` payload (both observed shapes). */
-function parseKimiUsages(payload: any): UsageRow[] {
-  const rows: UsageRow[] = []
-  const data = payload?.data
-  if (Array.isArray(data)) {
-    for (const item of data) {
-      const isOverall = item?.model_name === 'all'
-      const row = usageRow(item, isOverall ? 'weekly' : 'limit')
-      if (row) rows.push(isOverall ? { ...row, label: 'weekly' } : row)
-    }
-    return orderUsageRows(rows)
-  }
-  const usage = usageRow(payload?.usage, 'weekly')
-  if (usage) rows.push({ ...usage, label: 'weekly' })
-  const limits = payload?.limits
-  if (Array.isArray(limits)) {
-    for (const item of limits) {
-      const detail = item?.detail && typeof item.detail === 'object' ? item.detail : item
-      const window = item?.window && typeof item.window === 'object' ? item.window : {}
-      const duration = toNumber(window.duration)
-      const unit = String(window.timeUnit ?? window.time_unit ?? '').toUpperCase()
-      let fallback = 'limit'
-      if (duration !== null) {
-        if (unit.includes('MINUTE') && duration >= 60 && duration % 60 === 0) fallback = `${duration / 60}h limit`
-        else if (unit.includes('MINUTE')) fallback = `${duration}m limit`
-        else if (unit.includes('HOUR')) fallback = `${duration}h limit`
-        else if (unit.includes('DAY')) fallback = `${duration}d limit`
-        else if (unit.includes('MONTH')) fallback = `${duration}mo limit`
-      }
-      const row = usageRow(detail, fallback)
-      if (row) rows.push(row)
-    }
-  }
-  return orderUsageRows(rows)
-}
-
-/* ------------------------------------------------------------------ *
  * HTTP
  * ------------------------------------------------------------------ */
 
@@ -454,7 +416,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-function failView(id: string, displayName: string, kind: ProviderUsageView['kind'], status: ProviderUsageView['status'], message: string, active: boolean): ProviderUsageView {
+function failView(id: string, displayName: string, kind: ProviderUsageView['kind'], status: ProviderUsageView['status'], message: string | null, active: boolean): ProviderUsageView {
   return { id, displayName, kind, status, message, balances: null, usages: null, active }
 }
 
@@ -520,7 +482,17 @@ const ADAPTERS: Record<ProviderKind, QuotaAdapter> = {
       const base = root(baseURL)
       const url = base.endsWith('/v1') ? `${base}/usages` : `${base}/v1/usages`
       const body = await fetchJson(url, apiKey, signal, this.headers)
-      return { balances: null, usages: parseKimiUsages(body) }
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        throw new Error('unexpected usage response')
+      }
+      const { usages, hasPlanData } = parseKimiUsages(body)
+      if (usages.length > 0) return { balances: null, usages }
+      // A body with no quota container at all is the endpoint's "no plan"
+      // answer (`{}` once a Kimi Code membership lapses), not zero usage:
+      // report the account state instead of an empty card. Data that parses to
+      // nothing is a genuine parse failure and must stay visible as one.
+      if (!hasPlanData) throw new NoActiveSubscriptionError()
+      throw new Error('no usage windows in the usage response')
     },
   },
 
@@ -1255,6 +1227,9 @@ export class UsageService extends TypertRemoteService {
         }
         if (error instanceof DeepSeekAccountAuthRequiredError) {
           return failView(spec.id, spec.displayName, adapter.view, 'reauth-required', message, active)
+        }
+        if (error instanceof NoActiveSubscriptionError) {
+          return failView(spec.id, spec.displayName, adapter.view, 'no-subscription', null, active)
         }
         if (attempt >= maxAttempts || !isTransientQueryError(error)) {
           return failView(spec.id, spec.displayName, adapter.view, 'error', message, active)

@@ -22,7 +22,7 @@
   | `deepseek` | `deepseek-official`, `deepseek` | `GET {baseURL}/user/balance` | total / granted / topped-up balance |
   | `deepseek-account` | `deepseek-account` (dsh ≥ 0.1.7) | `GET {platformOrigin}/api/v0/users/get_user_summary` | account wallet balance (recharge + bonus merged; **reads the harness's built-in DeepSeek Account sign-in**, zero config). The harness composes this route unconditionally, so the card is **omitted while no sign-in is stored** — it appears on the next poll after you sign in |
   | `moonshot` | `moonshotai-cn`, `moonshotai` | `GET {baseURL}/users/me/balance` | available / voucher / cash balance |
-  | `kimi-coding` | `kimi-coding` | `GET {baseURL}/v1/usages` | weekly usage + rate-limit windows, reset countdown |
+  | `kimi-coding` | `kimi-coding` | `GET {baseURL}/v1/usages` | 5h / weekly / monthly usage windows + reset countdown. A lapsed membership is reported as **“no active plan”** instead of a blank card — the endpoint answers `{}` (HTTP 200) once the plan ends |
   | `openrouter` | `openrouter` | `GET {origin}/api/v1/credits` | credits used / total |
   | `github-copilot` | `github-copilot` | `GET api.github.com/copilot_internal/user` | plan usage snapshots (paid) or monthly usage (free) |
   | `openai-codex` | `openai-codex` | `GET {baseURL}/wham/usage` | ChatGPT subscription 5h / weekly windows + credits + spend control (**OAuth login**, not an API key — see the [setup guide](docs/provider-codex.md)) |

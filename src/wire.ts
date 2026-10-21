@@ -31,7 +31,12 @@ export interface ProviderUsageView {
   id: string
   displayName: string
   kind: 'balance' | 'usage' | null
-  status: 'ok' | 'error' | 'missing-credential' | 'missing-authorization' | 'reauth-required' | 'unsupported'
+  /**
+   * `no-subscription` means the credential works but the account has no active
+   * plan (Kimi answers `{}` once a membership lapses) — an account state to
+   * report, never a silent empty card.
+   */
+  status: 'ok' | 'error' | 'missing-credential' | 'missing-authorization' | 'reauth-required' | 'unsupported' | 'no-subscription'
   message: string | null
   balances: BalanceRow[] | null
   usages: UsageRow[] | null
@@ -51,6 +56,19 @@ export interface UsageListResult {
   /** Plugin package version, surfaced in the panel header. */
   version: string
   providers: ProviderUsageView[]
+}
+
+/**
+ * Host-side verdict for "the credential is valid, the account has no plan":
+ * an adapter throws it and the service maps it to the `no-subscription`
+ * status instead of the `error` a failed query gets. Kept beside the status
+ * union so the two stay one concept.
+ */
+export class NoActiveSubscriptionError extends Error {
+  constructor() {
+    super('no active subscription')
+    this.name = 'NoActiveSubscriptionError'
+  }
 }
 
 /* ------------------------------------------------------------------ *
