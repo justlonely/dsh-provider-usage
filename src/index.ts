@@ -63,6 +63,8 @@ import {
 } from './openai-codex.ts'
 import { orderUsageRows, toNumber, toResetAt, NoActiveSubscriptionError, type BalanceRow, type ProviderUsageView, type UsageListResult, type UsageRow } from './wire.ts'
 import { parseKimiUsages } from './kimi.ts'
+import { parseCommandCodeUsage } from './commandcode.ts'
+import { parseZaiUsage } from './zai.ts'
 import {
   ACCESS_KEY_REFS,
   AGENT_PLAN_ACTIONS,
@@ -515,43 +517,7 @@ const ADAPTERS: Record<ProviderKind, QuotaAdapter> = {
       } catch {
         summary = null
       }
-      const rows: UsageRow[] = []
-      const windows: Record<string, any> = body?.windowLimits ?? {}
-      const windowRow = (label: string, win: any) => {
-        if (win === null || typeof win !== 'object') return
-        const used = toNumber(win.used)
-        const cap = toNumber(win.cap)
-        if (used === null || cap === null || cap <= 0) return
-        const reset = toNumber(win.resetAt)
-        rows.push({
-          label,
-          used,
-          limit: cap,
-          remaining: cap - used,
-          percent: (used / cap) * 100,
-          resetAt: reset !== null && reset > 0 ? toResetAt(win.resetAt) : null,
-        })
-      }
-      windowRow('5h limit', windows.fiveHour)
-      windowRow('weekly', windows.weekly)
-      const credits: Record<string, any> = body?.credits ?? {}
-      const monthly = toNumber(credits.monthlyCredits)
-      if (monthly !== null) {
-        const purchased = toNumber(credits.purchasedCredits) ?? 0
-        const free = toNumber(credits.freeCredits) ?? 0
-        const remaining = monthly + purchased + free
-        const usedPeriod = summary !== null ? toNumber(summary.totalCredits) : null
-        const total = usedPeriod !== null ? usedPeriod + remaining : null
-        rows.push({
-          label: 'monthly credits',
-          used: usedPeriod,
-          limit: total,
-          remaining,
-          percent: total !== null && total > 0 && usedPeriod !== null ? (usedPeriod / total) * 100 : null,
-          resetAt: null,
-        })
-      }
-      return { balances: null, usages: orderUsageRows(rows) }
+      return { balances: null, usages: parseCommandCodeUsage(body, summary) }
     },
   },
 
@@ -839,39 +805,7 @@ const ADAPTERS: Record<ProviderKind, QuotaAdapter> = {
         'content-type': 'application/json',
         'accept-language': 'en-US,en',
       })
-      if (body?.success === false) {
-        throw new Error(String(body?.msg ?? body?.message ?? 'z.ai quota query failed'))
-      }
-      const limits: any[] = Array.isArray(body?.data?.limits) ? body.data.limits : []
-      // Coding-plan windows arrive as TOKENS_LIMIT or CREDIT_LIMIT entries
-      // depending on the plan (percentage = used); TIME_LIMIT is the MCP lane
-      // and carries no token quota, so it stays filtered out. Entries carry
-      // their reset span in `unit` (3 = hours, 6 = months) scaled by `number`.
-      // The nearest reset is the 5h window, the further one the weekly window.
-      const limitEntries = limits
-        .filter((item) => item?.type === 'TOKENS_LIMIT' || item?.type === 'CREDIT_LIMIT')
-        .sort((a, b) => (toNumber(a?.nextResetTime) ?? Infinity) - (toNumber(b?.nextResetTime) ?? Infinity))
-      const rows: UsageRow[] = []
-      limitEntries.forEach((item, index) => {
-        const percent = toNumber(item?.percentage)
-        if (percent === null) return
-        const unit = toNumber(item?.unit)
-        const span = toNumber(item?.number)
-        let label: string
-        if (index === 0) label = '5h limit'
-        else if (unit === 6) label = `${span ?? 1}mo limit`
-        else if (unit === 3) label = `${span ?? 1}h limit`
-        else label = index === 1 ? 'weekly' : `limit ${index + 1}`
-        rows.push({
-          label,
-          used: percent,
-          limit: 100,
-          remaining: 100 - percent,
-          percent,
-          resetAt: toResetAt(item?.nextResetTime),
-        })
-      })
-      return { balances: null, usages: orderUsageRows(rows) }
+      return { balances: null, usages: parseZaiUsage(body) }
     },
   },
 
