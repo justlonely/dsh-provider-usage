@@ -1,0 +1,112 @@
+name: Compatibility watch
+
+# The plugin declares an open host range (`>=0.1.2-alpha.3`) so a dsh upgrade can
+# never make the harness's peer gate skip it. That trade is only safe if drift is
+# caught here instead: on every push and pull request, and once a day, judge the
+# packed tarball against the dsh releases users actually install.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dsh-release:
+    # `latest` and `next` are separate release lines with separate host packages;
+    # a plugin has to satisfy both while both are installable.
+    name: dsh ${{ matrix.tag }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [latest, next]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Set up pnpm
+        run: npm install --global pnpm@10.33.0
+
+      - name: Verify the plugin itself
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+          pnpm test
+          pnpm build
+
+      - name: Pack the artifact a user would install
+        run: npm pack --ignore-scripts
+
+      - name: Resolve the dsh release
+        id: release
+        # Every @deepseek-ai/dsh-* package is published in lockstep with dsh, so
+        # one version string covers them all — and it has to come from dsh's own
+        # dist-tags, because the sub-packages' tags lag behind (their `latest`
+        # still points at 0.1.0-rc.6).
+        run: |
+          dsh_version="$(npm view '@deepseek-ai/dsh@${{ matrix.tag }}' version)"
+          cordis_range="$(npm view "@deepseek-ai/dsh@${dsh_version}" dependencies.@deepseek-ai/cordis)"
+          schemastery_range="$(npm view "@deepseek-ai/dsh@${dsh_version}" dependencies.@deepseek-ai/schemastery)"
+          {
+            echo "dsh=${dsh_version}"
+            echo "cordis=${cordis_range:-^4.0.1}"
+            echo "schemastery=${schemastery_range:-^3.18.1}"
+          } >> "$GITHUB_OUTPUT"
+          echo "dsh ${{ matrix.tag }} -> ${dsh_version} (cordis ${cordis_range:-^4.0.1}, schemastery ${schemastery_range:-^3.18.1})"
+
+      - name: Install that release's host packages beside the tarball
+        env:
+          DSH_VERSION: ${{ steps.release.outputs.dsh }}
+          CORDIS_RANGE: ${{ steps.release.outputs.cordis }}
+          SCHEMASTERY_RANGE: ${{ steps.release.outputs.schemastery }}
+          SCRATCH: ${{ runner.temp }}/compat-scratch
+        # Two deliberate choices here.
+        #
+        # pnpm, not npm: pnpm is what the harness itself installs profile plugins
+        # with, and `auto-install-peers` is what brings the host packages' own
+        # peer closure (cordis-plugin-group and friends) — npm leaves those out.
+        # The plugin's open host ranges then resolve to nothing at all, because
+        # every @deepseek-ai/dsh-* version ever published is a prerelease and
+        # standard semver excludes those from a range, so no second copy of a
+        # host package can quietly appear and make this test meaningless.
+        #
+        # Outside the repository: a scratch directory inside the tree would
+        # inherit the root pnpm-workspace.yaml, whose minimumReleaseAge policy
+        # rejects freshly published releases — a red run about the policy rather
+        # than about this plugin.
+        run: |
+          tarball="$(pwd)/dsh-provider-usage-$(node -p "require('./package.json').version").tgz"
+          rm -rf "$SCRATCH"
+          mkdir -p "$SCRATCH"
+          cd "$SCRATCH"
+          npm init --yes > /dev/null
+          printf 'auto-install-peers=true\nstrict-peer-dependencies=false\n' > .npmrc
+          pnpm add \
+            "@deepseek-ai/dsh-app-boot@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-credentials@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-launch-environment@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-settings@${DSH_VERSION}" \
+            "@deepseek-ai/dsh-typert-protocol@${DSH_VERSION}" \
+            "@deepseek-ai/cordis@${CORDIS_RANGE}" \
+            "@deepseek-ai/schemastery@${SCHEMASTERY_RANGE}"
+          pnpm add "$tarball"
+
+      - name: Replay the gate and drive a live query
+        env:
+          SCRATCH: ${{ runner.temp }}/compat-scratch
+        run: node scripts/compat-smoke.mjs "$SCRATCH" "${{ steps.release.outputs.dsh }}"

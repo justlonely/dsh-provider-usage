@@ -10,7 +10,7 @@
 
 # dsh-provider-usage
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：在 Web GUI 上悬浮一个可任意拖动的用量球，实时查看所有已配置 LLM provider 的账户余额与用量——不用再逐个登录 provider 控制台确认。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：在 Web GUI **与桌面端（Desktop App）**悬浮一个可任意拖动的用量球，实时查看所有已配置 LLM provider 的账户余额与用量——不用再逐个登录 provider 控制台确认。同一个包同时支持两种形态：桌面端窗口渲染的就是同一套 Web GUI，一次发布两端通用。
 
 ## 功能
 
@@ -20,12 +20,13 @@
   | kind | 路由 | 查询接口 | 展示内容 |
   |---|---|---|---|
   | `deepseek` | `deepseek-official`、`deepseek` | `GET {baseURL}/user/balance` | 余额（含赠送/充值明细） |
+  | `deepseek-account` | `deepseek-account`（dsh ≥ 0.1.7） | `GET {platformOrigin}/api/v0/users/get_user_summary` | 账号钱包余额（充值 + 赠送合并展示，**读取 harness 内置 DeepSeek 账号登录**，无需配置）。该路由由 harness 无条件组合，因此**未登录时不显示该卡片**，登录后下一次轮询自动出现 |
   | `moonshot` | `moonshotai-cn`、`moonshotai` | `GET {baseURL}/users/me/balance` | 可用/代金券/现金余额 |
-  | `kimi-coding` | `kimi-coding` | `GET {baseURL}/v1/usages` | 每周用量及各限速窗口，含重置倒计时 |
+  | `kimi-coding` | `kimi-coding` | `GET {baseURL}/v1/usages` | 5h / 每周 / 每月用量窗口，含重置倒计时。会员到期后接口返回 `{}`（HTTP 200），卡片会明确显示**「无生效中的套餐」**，而不是留一张空白卡片 |
   | `commandcode` | `commandcode` | `GET {origin}/alpha/billing/credits` | 5h/周窗口 + 月度积分（用量摘要尽力而为） |
   | `openrouter` | `openrouter` | `GET {origin}/api/v1/credits` | credit 已用/总额 |
   | `github-copilot` | `github-copilot` | `GET api.github.com/copilot_internal/user` | 付费档用量快照 / 免费档月度用量 |
-  | `openai-codex` | `openai-codex` | `GET {baseURL}/wham/usage` | ChatGPT 订阅 5h/周窗口 + credits + spend control（**OAuth 登录**，非 API key，见 [通过 OAuth 添加 OpenAI Codex](#通过-oauth-添加-openai-codex)） |
+  | `openai-codex` | `openai-codex` | `GET {baseURL}/wham/usage` | ChatGPT 订阅 5h/周窗口 + credits + spend control（**OAuth 登录**，非 API key，见 [配置指南](docs/provider-codex.zh.md)） |
   | `openai` | `openai` | `GET {origin}/v1/organization/costs` | 当月花费（**需 Admin key**，普通 key 会 403） |
   | `anthropic` | `anthropic` | `GET {baseURL}/v1/organizations/cost_report` | 当月花费（**需 Admin key**，`x-api-key` 头） |
   | `minimax` | `minimax`、`minimax-cn` | `GET {origin}/v1/api/openplatform/coding_plan/remains` | Coding Plan 5h/周剩余百分比 |
@@ -33,10 +34,13 @@
   | `opencode` | `opencode`、`opencode-go` | `GET {baseURL}/usage` | Zen Go 滚动/周/月窗口 |
   | `vercel-ai-gateway` | `vercel-ai-gateway` | `GET {baseURL}/v1/credits` | 团队 credit 余额 |
   | `xai` | `xai` | `GET {baseURL}/billing/credits` | 预付余额（USD） |
-  | `volcengine-ark-agent` | `ark-agent-plan`、`ark-agent-plan-cn` | `POST open.volcengineapi.com GetAFPUsage` | 火山方舟 Agent Plan 5h/周/月窗口（**需 IAM AK/SK 签名**，非推理 key，见 [火山方舟 Agent Plan / Coding Plan](#火山方舟-agent-plan--coding-plan)） |
+  | `volcengine-ark-agent` | `ark-agent-plan`、`ark-agent-plan-cn` | `POST open.volcengineapi.com GetAFPUsage` | 火山方舟 Agent Plan 5h/周/月窗口（**需 IAM AK/SK 签名**，非推理 key，见 [配置指南](docs/provider-ark.zh.md)） |
   | `volcengine-ark-coding` | `ark-coding-plan`、`ark-coding-plan-cn` | `POST open.volcengineapi.com GetCodingPlanUsage` | 火山方舟 Coding Plan session/周/月窗口（同一对 AK/SK） |
-- **密钥安全** —— 通过 harness 凭据服务按次解析（环境变量 / `~/.dsh/.credentials.yaml`），不缓存、不落地。对 OAuth 类 Provider（OpenAI Codex）则直接读取登录流程存入的授权记录，并在令牌临近过期时自动刷新。火山方舟套餐路由是唯一「查询需要路由自身 key 之外凭证」的情形：套餐额度走**签名控制面**调用，因此这两类适配器改读一对 IAM AK/SK（见 [火山方舟 Agent Plan / Coding Plan](#火山方舟-agent-plan--coding-plan)）。
-- **悬浮球入口** —— 可任意拖动的悬浮球点击弹出用量面板，位置持久化；默认停靠在主对话区域左下角（左边距 = 底边距），面板头部的归位按钮一键回到默认位置；Provider 列表超过面板高度时自动滚动，面板**顶部边缘可拖拽**调整面板高度（变长/变短，localStorage 持久化）；球体光晕表达**当前正在使用**的 Provider——即**当前聚焦 session 自己的模型选择**（composer 模型座同源，客户端实时跟踪），因此切换 session 后无需重新选择模型，面板会立即把"使用中"标记切到该 session 的 Provider：绿色正常、黄色用量窗口剩余不足 30% 或余额低于黄阈值、红色查询失败/缺密钥/用量 ≥90% 或余额低于红阈值。闲置的 Provider 余量不足不再影响悬浮球颜色——切换到余量充足的另一个 Provider 后球体会恢复绿色；面板会标注"使用中"的 Provider，并照常列出所有 Provider 的用量明细。
+- **密钥安全** —— 通过 harness 凭据服务按次解析（环境变量 / `~/.dsh/.credentials.yaml`），不缓存、不落地。对 OAuth 类 Provider（OpenAI Codex）则直接读取登录流程存入的授权记录，并在令牌临近过期时自动刷新。火山方舟套餐路由是唯一「查询需要路由自身 key 之外凭证」的情形：套餐额度走**签名控制面**调用，因此这两类适配器改读一对 IAM AK/SK（见 [配置指南](docs/provider-ark.zh.md)）。
+- **悬浮球入口** —— 可任意拖动的悬浮球，点击弹出用量面板：
+  - 可拖到视口任意位置（位置持久化）；默认停靠在主对话区域左下角（左边距 = 底边距），面板头部的归位按钮一键回到默认位置。
+  - Provider 列表超过面板高度时自动滚动；面板**顶部边缘可拖拽**调整高度（localStorage 持久化）。
+  - 球体光晕表达**当前正在使用**的 Provider——即**当前聚焦 session 自己的模型选择**（composer 模型座同源，客户端实时跟踪），切换 session 后无需重新选择模型，面板立即把「使用中」标记切到该 session 的 Provider。绿色正常；黄色用量窗口剩余不足 30% 或余额低于黄阈值；红色查询失败/缺密钥/用量 ≥90% 或余额低于红阈值。闲置 Provider 余量不足不影响球体颜色——面板会标注「使用中」的 Provider，并照常列出所有 Provider 的用量明细。
 - **版本徽章** —— 面板标题旁显示当前运行的插件版本，一眼确认加载的是哪个发布版。
 - **中英双语** —— 面板内置中英文界面，默认跟随 harness 系统语言，标题栏按钮一键切换（localStorage 持久化）。
 - **刷新周期可调** —— 面板内调整（15s–30min，localStorage 持久化），默认值由插件配置提供。
@@ -51,133 +55,39 @@
 | --- | --- |
 | ![DeepSeek 余额面板（中文）](docs/panel-ds-zh.png) | ![OpenAI Codex 用量面板（中文）](docs/panel-codex-zh.png) |
 
-## 通过 OAuth 添加 OpenAI Codex
+## Provider 配置指南
 
-OpenAI Codex 是 **ChatGPT 订阅制** Provider：它用 OAuth access token 认证，而不是 API key，所以没有任何密钥可填。dsh 本身没有为该路由内置 OAuth 登录按钮——但本插件依然能查询它的余量，因为插件会直接从 harness 凭据库读取登录后存入的授权记录。按下面步骤配置一次，用量面板就能展示真实的 Codex 5 小时 / 每周窗口。
+绝大多数 provider 只需 API key 即可。有两类需要多做一步配置：
 
-### 1. 确认路由已配置
+- **OpenAI Codex** —— ChatGPT 订阅制 Provider，通过 harness 凭据库中的 OAuth 授权记录认证（没有 API key 可填）。路由配置、令牌刷新/轮换行为、间歇性 "servers overloaded" 的重试策略见 [docs/provider-codex.zh.md](docs/provider-codex.zh.md)。
+- **火山方舟 Agent Plan / Coding Plan** —— 套餐额度在火山控制面，除推理 key 外还需一对 IAM AK/SK 做签名。路由与凭证配置见 [docs/provider-ark.zh.md](docs/provider-ark.zh.md)。
 
-登录会把授权记录写入 `llm-pi-ai/openai-codex`，且路由需要已配置，`ctx.llm` 才会列出它。默认 web profile 已挂载 `llm-pi-ai` 适配器，空 profile 即可——例如在 `~/.dsh/settings.yaml` 中：
-
-```yaml
-llm-pi-ai:
-  providers:
-    openai-codex: {}
-```
-
-### 2. 通过 harness 授权 seam 登录
-
-`dsh-llm-pi-ai` 在 harness 授权 seam（`ctx.authorization`，凭据键 `llm-pi-ai/openai-codex`）上为 `openai-codex` 注册了 "OpenAI (ChatGPT Plus/Pro)" 的 OAuth 流程。从任何调起该流程的入口完成登录——harness 模型/授权界面上的登录入口，或任何会把登录结果持久化到 harness 凭据库的 pi-ai 客户端。用你的 ChatGPT 账号完成浏览器（或设备码）流程后，harness 会把授权记录存到 `~/.dsh/.credentials.yaml` 的 `llm-pi-ai/openai-codex` 下：
-
-```yaml
-records:
-  llm-pi-ai/openai-codex:
-    kind: grant
-    payload:
-      type: oauth
-      access: <access token>
-      refresh: <refresh token>
-      expires: <epoch ms>
-      accountId: <chatgpt account id>
-```
-
-> 授权记录必须落在 harness 凭据库（即上面的记录）。使用独立凭据文件的 Codex 客户端（如 `dsh-codex` 的 `$DSH_HOME/.openai-codex-auth.json`，或 Codex CLI 的 `~/.codex/auth.json`）不会写入该记录，本插件无法读取。
-
-### 3. 查看余量
-
-配置完成。路由会被自动探测（`ctx.llm` 会列出 `openai-codex`），插件会：
-
-1. 每次轮询都从凭据库**实时读取**授权记录（不缓存）；
-2. access token 距过期不足 30 秒时**自动刷新** OAuth 令牌，且**判断与轮换都发生在凭据库的排他锁内**——并发进程已经轮换过就复用它，不会把同一枚一次性 refresh token 花掉两次；回写失败会**报错**而不是被静默吞掉；
-3. 用 `Authorization: Bearer <access>` + 从令牌 JWT 中解析出的 `ChatGPT-Account-Id` 头请求 `GET https://chatgpt.com/backend-api/wham/usage`；若返回 `401` 会自动刷新一次并重试。
-
-面板随即展示订阅的 **5h 上限**、**每周**窗口（已用百分比 + 重置倒计时），以及计划上报的 **credits** 与 **spend control** 余额。若授权记录缺失，卡片会显示「未完成 OAuth 授权（llm-pi-ai/openai-codex）」，按第 2 步重新登录即可。若上游**拒绝**了记录里的 refresh token（`refresh_token_reused` / `invalid_grant`，即这枚 token 已被消费或撤销、而那次轮换没能落到本地），卡片会显示「OAuth 授权已失效，需重新登录 Codex」（悬停可看上游原始报错），并且插件在十分钟内不再反复请求令牌端点，而不是每轮轮询都撞一次。
-
-### 4. 故障排除：间歇性 "Our servers are currently overloaded"
-
-Codex 后端偶尔会返回 `Codex error: Our servers are currently overloaded. Please try again later.`，harness 随即以 `PI_AI_ERROR` 判本轮失败。这是 **OpenAI 端的间歇性过载**（账号、配额、网络通常都正常——可用 `GET /wham/usage` 确认窗口余量），但默认配置下不会自动重试，原因有两层：
-
-1. pi-ai 的 Codex 客户端内部认得 `overloaded` 是可重试错误，但默认重试次数为 0（`dsh-llm-pi-ai` 显式传 `maxRetries: 0`）；
-2. 错误冒泡后，其文本不含 `5xx` / `rate limit` / `timeout` 等关键词，被归类为兜底的 `PI_AI_ERROR`——而它**不在** `dsh-llm-retry` 的默认可重试码（`EMPTY_RESPONSE` / `RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT`）里，于是整轮直接失败。
-
-在 `~/.dsh/settings.yaml` 中给该 provider 加一段 `retryPolicy`，把 `PI_AI_ERROR` 纳入可重试码即可（重开 session 后生效）：
-
-```yaml
-llm-pi-ai:
-  providers:
-    openai-codex:
-      retryPolicy:
-        mode: normal
-        maxRetries: 10
-        retryableCodes:
-          - EMPTY_RESPONSE
-          - RATE_LIMIT
-          - SERVER
-          - TIMEOUT
-          - TRANSPORT
-          - PI_AI_ERROR
-        backoff:
-          initialDelayMs: 2000   # 首次重试延迟，指数翻倍
-          maxDelayMs: 60000      # 单次延迟上限
-          jitterRatio: 0.2       # ±20% 抖动
-```
-
-注意区分另一类**必然失败**：部分模型对 ChatGPT 订阅账号不可用，后端直接返回 `400 The '<model>' model is not supported when using Codex with a ChatGPT account.`（实测如 `gpt-5.3-codex-spark`、`gpt-5-codex`）。这类是永久错误，重试无效——请换用账号支持的模型（如 `gpt-5.4` / `gpt-5.5` / `gpt-5.6` 系列）。
-
-## 火山方舟 Agent Plan / Coding Plan
-
-火山方舟的**订阅套餐**（Agent Plan / Coding Plan）额度不在推理端点上，而在火山**控制面**（OpenTOP OpenAPI），且必须用 **IAM AK/SK 做 V4 签名**。路由上那把套餐 key（`ARK_AGENT_PLAN_API_KEY` 等）是数据面 key，只能调模型：拿它查额度会被拒（实测 `GetAFPUsage requires Volcengine Ark SSO STS`），面板会一直查不到数。因此这两条路由除了推理 key，还要额外配一对 AK/SK。
-
-### 1. 路由
-
-`baseURL` 决定用哪个适配器：含 `/api/plan` → Agent Plan，含 `/api/coding` → Coding Plan。
-
-```yaml
-llm-pi-ai:
-  providers:
-    ark-agent-plan:
-      displayName: 火山方舟 - Agent Plan
-      apiKeyEnv: ARK_AGENT_PLAN_API_KEY
-      api: openai-responses
-      baseURL: https://ark.cn-beijing.volces.com/api/plan/v3
-    ark-coding-plan:
-      displayName: 火山方舟 - Coding Plan
-      apiKeyEnv: ARK_CODING_PLAN_API_KEY
-      baseURL: https://ark.cn-beijing.volces.com/api/coding   # Anthropic 协议；OpenAI 兼容端点用 /api/coding/v3
-```
-
-路由 id 任意；`ark-agent-plan` / `ark-coding-plan` / `ark-agent-plan-cn` / `ark-coding-plan-cn` 这些常见 id 即使省略 `baseURL` 也能被识别。
-
-### 2. 配置 AK/SK
-
-在火山引擎控制台 → 访问控制（IAM）→ 访问密钥，创建或查看 Access Key ID / Secret Access Key（查额度只需读权限），然后任选一种方式提供：
-
-```yaml
-# ~/.dsh/.credentials.yaml（也可用同名进程环境变量或项目 .env）
-refs:
-  VOLC_ARK_ACCESS_KEY_ID: AKLT...
-  VOLC_ARK_ACCESS_KEY_SECRET: ...
-```
-
-取值顺序：`VOLC_ARK_ACCESS_KEY_ID` → `VOLC_ACCESS_KEY_ID` → `VOLC_ACCESSKEY`（secret 同理，另有 `VOLC_ACCESS_KEY_SECRET` / `VOLC_SECRETKEY` / `VOLC_SECRET_KEY` 别名），第一个有值的生效。
-
-没配时面板显示「未配置密钥（VOLC_ARK_ACCESS_KEY_ID + VOLC_ARK_ACCESS_KEY_SECRET）」；配错时直接显示控制面错误（如 `HTTP 401: InvalidAccessKey: The security token[...] is invalid.`）。
-
-### 3. 展示内容
-
-- **Agent Plan** —— 5h / 每周 / 每月三个窗口，按 `Used`/`Quota` 绝对值算已用百分比 + 重置倒计时（`AFPDaily` 与控制台、`arkcli` 一致，不展示）。
-- **Coding Plan** —— session（5h）/ 每周 / 每月三个窗口，直接用后端的已用百分比。套餐未订阅或已回收时该路由没有数据行。
-
-## 安装
+## 安装或升级
 
 > [!NOTE]
-> 需要先安装 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
+> 需要先安装 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。所有形态下安装与升级都是同一条命令。
 
-### npm
+### Web GUI
 
 ```sh
 dsh plugin --profile web add dsh-provider-usage@latest
 ```
+
+插件集合变化后需重启 `dsh web` 并刷新页面（之后的纯代码改动只需重新 build + 重新 add + 刷新页面）。如果目标版本刚发布不久，profile 的供应链冷静期（`minimumReleaseAge`）可能会静默停留在旧版——这时指定精确版本号（如 `dsh plugin --profile web add dsh-provider-usage@0.3.10`），dsh 会自动豁免该版本。面板标题旁的版本徽章可以确认实际加载的版本。
+
+### 桌面端（Desktop App）
+
+同一个包同样支持桌面端——桌面端窗口渲染的就是同一套 Web GUI，**无需单独的插件或构建**。桌面端独占自己的 profile（`~/.dsh/profiles/desktop`），需在桌面端内单独安装一次：
+
+1. 桌面端内打开 **设置 → 插件** → **添加插件** → **安装第三方插件**（[截图](docs/desktop-install-menu-zh.png)）；
+2. 输入 `dsh-provider-usage`，点击 **安装**（[截图](docs/desktop-install-dialog-zh.png)）；
+3. 点击 **立即启用**（[截图](docs/desktop-install-enable-zh.png)）。
+
+悬浮球随即出现在桌面端窗口中（[效果截图](docs/desktop-panel-zh.png)）。面板偏好（球位置、刷新周期、阈值）按 origin 分别持久化，桌面端与 Web GUI 各自记忆、互不影响。
+
+桌面端升级：在同一个插件页面先卸载再安装新版（安装弹窗要求这个顺序），重新加载窗口即可。
+
+CLI 方式：完全退出桌面端（含托盘）后，使用桌面安装目录自带的 CLI——`resources\runtime\cli\bin\dsh.cmd plugin --profile desktop add dsh-provider-usage@latest`。npm 版 `dsh` 会拒绝 desktop profile（报 `profile "desktop" is managed exclusively by the Electron application`）。
 
 ### 从源码构建
 
@@ -187,24 +97,20 @@ cd dsh-provider-usage
 pnpm install
 pnpm build
 pnpm pack   # 产出 dsh-provider-usage-<version>.tgz
-dsh plugin --profile web add ./dsh-provider-usage-<version>.tgz
+dsh plugin --profile web add ./dsh-provider-usage-<version>.tgz   # 桌面端：--profile desktop（用桌面自带 CLI）
 ```
 
 注意要安装 **tarball** 而不是仓库目录：`dsh plugin --profile web add .` 会链接整个仓库，仓库自带 `node_modules` 里的 `@deepseek-ai/cordis` 会遮蔽 harness 的共享实例，导致 host 半注册不上（RPC 404）。link 方式仍适合纯 UI 迭代（浏览器 bundle 自包含，重新 build + 刷新页面即生效），但需要 host 半时请切换到 tarball 或 npm 正式版。若替换 link 安装时 pnpm 报 `EPERM ... symlink`，手动删除 profile 目录下残留的 `node_modules/dsh-provider-usage` 联结后重试即可。
 
-插件集合变化后需重启 `dsh web`；之后仅改动代码时重新 build + 重新 add + 刷新页面即可。
+## 宿主兼容性
 
-## 升级
+本插件导入的宿主包（`@deepseek-ai/dsh-credentials`、`-settings`、`-typert-protocol`、`-launch-environment`）会解析到运行中 harness 自己的那一份，dsh 的 peer 闸门会拿声明范围与运行时版本比对。因此本插件声明**开放下界** `>=0.1.2-alpha.3`：任何运行时（含预发布）都能通过——窄的 `^` 范围会在 dsh 每次 minor 升级时被 `skipping profile bundle` 跳过。请通过 `dsh plugin … add`（走 pnpm）安装：直接用 `npm install` 会报 `ERESOLVE`，因为标准 semver 不会用开放范围匹配预发布版本。
 
-```sh
-dsh plugin --profile web add dsh-provider-usage@latest
-```
-
-然后重启 `dsh web` 并刷新页面。如果目标版本刚发布不久，profile 的供应链冷静期（`minimumReleaseAge`）可能会静默停留在旧版——这时指定精确版本号（如 `dsh plugin --profile web add dsh-provider-usage@0.3.10`），dsh 会自动豁免该版本。面板标题旁的版本徽章可以确认实际加载的版本。
+如果某个 dsh 版本改掉了插件读取的接缝，插件会降级而不是报错——harness 日志会指明缺什么（`provider-usage: this dsh provides no …`，见 `src/host-seams.ts`），[`compat`](.github/workflows/compat.yml) 工作流每天对 `latest` 与 `next` 两条发布线回放闸门，漂移会在 CI 暴露而不是在你的面板里。
 
 ## 配置说明
 
-默认开箱即用：自动探测当前 profile 的所有 provider 路由。也可以在 `~/.dsh/profiles/web/cordis.patch.yml` 中调整——**按 id 覆盖**包内 bundle 已挂载的行（包自带的 bundle patch 已经 insert 过该行，再 insert 一次相同 id 会导致启动报 `duplicate loader entry id`）：
+默认开箱即用：自动探测当前 profile 的所有 provider 路由。也可以在 profile 的 bundle patch 中调整——`~/.dsh/profiles/web/cordis.patch.yml`（桌面端：`~/.dsh/profiles/desktop/cordis.patch.yml`）——**按 id 覆盖**包内 bundle 已挂载的行（包自带的 bundle patch 已经 insert 过该行，再 insert 一次相同 id 会导致启动报 `duplicate loader entry id`）：
 
 ```yaml
 - id: provider-usage

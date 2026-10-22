@@ -34,7 +34,7 @@ interface ProviderUsageView {
   id: string
   displayName: string
   kind: 'balance' | 'usage' | null
-  status: 'ok' | 'error' | 'missing-credential' | 'missing-authorization' | 'reauth-required' | 'unsupported'
+  status: 'ok' | 'error' | 'missing-credential' | 'missing-authorization' | 'reauth-required' | 'unsupported' | 'no-subscription'
   message: string | null
   balances: BalanceRow[] | null
   usages: UsageRow[] | null
@@ -394,7 +394,7 @@ function healthTone(data: UsageListResult | null, error: string | null, red: num
   const relevant = active.length > 0 ? active : providers
   let tone: 'ok' | 'warn' | 'danger' = 'ok'
   for (const provider of relevant) {
-    if (provider.status === 'error' || provider.status === 'missing-credential' || provider.status === 'missing-authorization' || provider.status === 'reauth-required') return 'danger'
+    if (provider.status === 'error' || provider.status === 'missing-credential' || provider.status === 'missing-authorization' || provider.status === 'reauth-required' || provider.status === 'no-subscription') return 'danger'
     const providerToneValue = providerTone(provider, red, yellow)
     if (providerToneValue === 'danger') return 'danger'
     if (providerToneValue === 'warn') tone = 'warn'
@@ -477,6 +477,8 @@ function UsageRows({ provider, now, red, yellow, t }: { provider: ProviderUsageV
 }
 
 function ProviderCard({ provider, now, red, yellow, t }: { provider: ProviderUsageView; now: number; red: number; yellow: number; t: UsageActionProps['t'] }) {
+  const balances = provider.balances ?? []
+  const usages = provider.usages ?? []
   return (
     <div className={`dsh-usage-card${provider.active ? ' dsh-usage-card--active' : ''}`}>
       <div className="dsh-usage-cardHead">
@@ -491,10 +493,14 @@ function ProviderCard({ provider, now, red, yellow, t }: { provider: ProviderUsa
         <span className="dsh-usage-message">{t('status.missingAuthorization', { key: provider.message })}</span>
       ) : provider.status === 'reauth-required' ? (
         <span className="dsh-usage-message" title={provider.message ?? undefined}>{t('status.reauthRequired')}</span>
+      ) : provider.status === 'no-subscription' ? (
+        // The credential works, the account has no plan (an expired Kimi Code
+        // membership answers `{}`): say so instead of leaving the card blank.
+        <span className="dsh-usage-message">{t('status.noSubscription')}</span>
       ) : provider.status === 'error' ? (
         <span className="dsh-usage-message">{t('status.error')}: {provider.message}</span>
       ) : provider.kind === 'balance' ? (
-        (provider.balances ?? []).map((row, index) => {
+        balances.length > 0 ? balances.map((row, index) => {
           const tone = balanceTone(toAmount(row.total), red, yellow)
           return (
             <div key={`${row.currency}-${index}`}>
@@ -510,9 +516,13 @@ function ProviderCard({ provider, now, red, yellow, t }: { provider: ProviderUsa
               </span>
             </div>
           )
-        })
-      ) : (
+        }) : (
+          <span className="dsh-usage-message">{t('status.noUsageData')}</span>
+        )
+      ) : usages.length > 0 ? (
         <UsageRows provider={provider} now={now} red={red} yellow={yellow} t={t} />
+      ) : (
+        <span className="dsh-usage-message">{t('status.noUsageData')}</span>
       )}
     </div>
   )

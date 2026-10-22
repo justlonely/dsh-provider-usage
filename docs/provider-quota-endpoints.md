@@ -340,3 +340,20 @@ body: {}
 - 来源：官方 `@volcengine/openapi`（V4 签名实现）、`volcengine/ark-cli`（`skills/arkcli-usage`）、[CodexBar PR #2496](https://github.com/steipete/CodexBar/pull/2496)（Agent Plan AFP 读取）、[dsh-volcark-quota](https://github.com/ZnonEn/dsh-volcark-quota)（同类 DSH 插件）、网关实测。
 
 ---
+
+## 8. deepseek-account — yes（dsh ≥ 0.1.7 内置账号登录，非 API key）
+
+dsh 0.1.7 起 `llm-deepseek` 拆为两条路由：`deepseek-official`（API key，走 `deepseek` 适配器）与 `deepseek-account`（harness 内置浏览器 PKCE 登录，见 `@deepseek-ai/dsh-deepseek-account-platform`）。账号余额查询不走 `/user/balance`（那是 API key 的接口），而是账号平台（platform.deepseek.com）的钱包接口：
+
+```
+GET {platformOrigin}/api/v0/users/get_user_summary
+x-dsh-auth-token: <存储的账号 grant token>
+```
+
+- **grant 存储**：凭据记录 `credentialKey('deepseek-account-platform', 'default')`，payload 为 `{ version: 1, token, issuer }`，`issuer` 即配置的 `platformOrigin`（默认 `https://platform.deepseek.com`），token 只在签发它的 origin 上有效。
+- **响应信封**：`{ code: 0, data: { biz_code: 0, biz_data: { normal_wallets: [{currency, balance}], bonus_wallets: [...] } } }`；`normal_wallets` 是充值余额，`bonus_wallets` 是赠送余额，面板合并为 total/granted/toppedUp 展示。
+- **金额格式**：平台 Web 端 big.js 语法（允许 `0E-16`、`5.0000000000000000` 等十进制指数形式）。
+- **失效判定**：HTTP 401 或顶层 `code: 40003` 表示登录失效，只能重新走浏览器登录（token 不可刷新）。
+- **来源**：harness 包 `@deepseek-ai/dsh-deepseek-account-platform`（README 与 lib 实现，0.1.7-rc.2）。
+
+---

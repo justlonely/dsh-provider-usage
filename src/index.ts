@@ -8,7 +8,11 @@
  * each provider kind has its own wire adapter (see ADAPTERS below):
  *
  * - `deepseek`       → GET {baseURL}/user/balance              (充值余额)
- * - `kimi-coding`    → GET {baseURL}/v1/usages                 (订阅配额, weekly / 5h windows)
+ * - `deepseek-account` → GET {platformOrigin}/api/v0/users/get_user_summary
+ *                     (DSH 账号余额, x-dsh-auth-token grant; 见 deepseek-account.ts,
+ *                     dsh ≥ 0.1.7 的 `deepseek-account` 路由)
+ * - `kimi-coding`    → GET {baseURL}/v1/usages                 (订阅配额: 5h/weekly/monthly 窗口;
+ *                     会员到期后接口回 `{}`，卡片如实报告“无生效套餐”而不是留空)
  * - `moonshot`       → GET {baseURL}/users/me/balance          (开放平台余额)
  * - `openrouter`     → GET {origin}/api/v1/credits             (credit 总额与已用量)
  * - `github-copilot` → GET api.github.com/copilot_internal/user (订阅配额快照, OAuth token)
@@ -38,7 +42,17 @@ import z from '@deepseek-ai/schemastery'
 import { credentialKey, credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { Remote, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
+import {
+  DEEPSEEK_ACCOUNT_CREDENTIAL_KEY,
+  DeepSeekAccountAuthRequiredError,
+  isUnusedAccountRoute,
+  parseAccountSummaryEnvelope,
+  parseDeepSeekAccountGrant,
+  type DeepSeekAccountGrant,
+  type DeepSeekAccountRecordStore,
+} from './deepseek-account.ts'
 import { readLiveSection, settingsNsForRoute } from './section.ts'
+import { missingHostSeams } from './host-seams.ts'
 import {
   OpenAiCodexReauthRequiredError,
   openAiCodexAccountId,
@@ -47,7 +61,8 @@ import {
   type OpenAiCodexGrant,
   type OpenAiCodexGrantStore,
 } from './openai-codex.ts'
-import { orderUsageRows, toNumber, toResetAt, usageRow, type BalanceRow, type ProviderUsageView, type UsageListResult, type UsageRow } from './wire.ts'
+import { orderUsageRows, toNumber, toResetAt, NoActiveSubscriptionError, type BalanceRow, type ProviderUsageView, type UsageListResult, type UsageRow } from './wire.ts'
+import { parseKimiUsages } from './kimi.ts'
 import {
   ACCESS_KEY_REFS,
   AGENT_PLAN_ACTIONS,
@@ -75,6 +90,7 @@ const NS = 'provider-usage'
 
 const PROVIDER_KINDS = [
   'deepseek',
+  'deepseek-account',
   'kimi-coding',
   'moonshot',
   'openrouter',
@@ -213,6 +229,10 @@ type DetectedProvider = ResolvedProvider | UnsupportedRoute
 const KNOWN_ROUTES: Record<string, { baseURL?: string; apiKeyEnv?: string; displayName: string }> = {
   'deepseek-official': { baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY', displayName: 'DeepSeek' },
   deepseek: { baseURL: 'https://api.deepseek.com', apiKeyEnv: 'DEEPSEEK_API_KEY', displayName: 'DeepSeek' },
+  // dsh ≥ 0.1.7: the account route authenticates from the account platform's
+  // stored grant (no apiKeyEnv); the baseURL fallback is the platformOrigin
+  // the grant issuer defaults to (the adapter prefers the grant's own issuer).
+  'deepseek-account': { baseURL: 'https://platform.deepseek.com', displayName: 'DeepSeek Account' },
   'kimi-coding': { baseURL: 'https://api.kimi.com/coding', apiKeyEnv: 'KIMI_API_KEY', displayName: 'Kimi Code' },
   'moonshotai-cn': { baseURL: 'https://api.moonshot.cn/v1', apiKeyEnv: 'MOONSHOT_API_KEY', displayName: 'Moonshot AI CN' },
   moonshotai: { baseURL: 'https://api.moonshot.ai/v1', apiKeyEnv: 'MOONSHOT_API_KEY', displayName: 'Moonshot AI' },
@@ -271,46 +291,6 @@ function kindOfBaseURL(baseURL: string): ProviderKind | null {
  */
 function ownsCredentials(kind: ProviderKind): boolean {
   return ADAPTERS[kind].credentialRefs !== undefined
-}
-
-/* ------------------------------------------------------------------ *
- * Response parsing helpers
- * ------------------------------------------------------------------ */
-
-/** Parse the Kimi Code `/v1/usages` payload (both observed shapes). */
-function parseKimiUsages(payload: any): UsageRow[] {
-  const rows: UsageRow[] = []
-  const data = payload?.data
-  if (Array.isArray(data)) {
-    for (const item of data) {
-      const isOverall = item?.model_name === 'all'
-      const row = usageRow(item, isOverall ? 'weekly' : 'limit')
-      if (row) rows.push(isOverall ? { ...row, label: 'weekly' } : row)
-    }
-    return orderUsageRows(rows)
-  }
-  const usage = usageRow(payload?.usage, 'weekly')
-  if (usage) rows.push({ ...usage, label: 'weekly' })
-  const limits = payload?.limits
-  if (Array.isArray(limits)) {
-    for (const item of limits) {
-      const detail = item?.detail && typeof item.detail === 'object' ? item.detail : item
-      const window = item?.window && typeof item.window === 'object' ? item.window : {}
-      const duration = toNumber(window.duration)
-      const unit = String(window.timeUnit ?? window.time_unit ?? '').toUpperCase()
-      let fallback = 'limit'
-      if (duration !== null) {
-        if (unit.includes('MINUTE') && duration >= 60 && duration % 60 === 0) fallback = `${duration / 60}h limit`
-        else if (unit.includes('MINUTE')) fallback = `${duration}m limit`
-        else if (unit.includes('HOUR')) fallback = `${duration}h limit`
-        else if (unit.includes('DAY')) fallback = `${duration}d limit`
-        else if (unit.includes('MONTH')) fallback = `${duration}mo limit`
-      }
-      const row = usageRow(detail, fallback)
-      if (row) rows.push(row)
-    }
-  }
-  return orderUsageRows(rows)
 }
 
 /* ------------------------------------------------------------------ *
@@ -439,7 +419,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-function failView(id: string, displayName: string, kind: ProviderUsageView['kind'], status: ProviderUsageView['status'], message: string, active: boolean): ProviderUsageView {
+function failView(id: string, displayName: string, kind: ProviderUsageView['kind'], status: ProviderUsageView['status'], message: string | null, active: boolean): ProviderUsageView {
   return { id, displayName, kind, status, message, balances: null, usages: null, active }
 }
 
@@ -471,6 +451,32 @@ const ADAPTERS: Record<ProviderKind, QuotaAdapter> = {
     },
   },
 
+  'deepseek-account': {
+    view: 'balance',
+    // Classified by route id in resolveRoute (the platform origin never
+    // appears as a route baseURL); this match only serves manual specs.
+    match: /platform\.deepseek\.com/i,
+    async fetch(_baseURL, token, signal, _refresh, credentials) {
+      // `credentials[0]` carries the grant issuer: the token answers only at
+      // the platformOrigin that issued it, which outranks the catalog
+      // fallback baseURL. The token itself arrives as `apiKey`.
+      const origin = root(credentials?.[0] ?? _baseURL)
+      if (typeof token !== 'string' || token === '') throw new Error('DeepSeek Account is not signed in')
+      let body: any
+      try {
+        body = await fetchJson(`${origin}/api/v0/users/get_user_summary`, undefined, signal, { 'x-dsh-auth-token': token })
+      } catch (error) {
+        // HTTP 401 means the stored sign-in is dead; only a fresh browser
+        // sign-in fixes it, so surface the reauth verdict instead of retrying.
+        if (error instanceof Error && error.message.startsWith('HTTP 401')) throw new DeepSeekAccountAuthRequiredError()
+        throw error
+      }
+      const rows = parseAccountSummaryEnvelope(body)
+      if (rows.length === 0) throw new Error('no wallet data in the account summary response')
+      return { balances: rows, usages: null }
+    },
+  },
+
   'kimi-coding': {
     view: 'usage',
     match: /api\.kimi\.com\/coding/i,
@@ -479,7 +485,17 @@ const ADAPTERS: Record<ProviderKind, QuotaAdapter> = {
       const base = root(baseURL)
       const url = base.endsWith('/v1') ? `${base}/usages` : `${base}/v1/usages`
       const body = await fetchJson(url, apiKey, signal, this.headers)
-      return { balances: null, usages: parseKimiUsages(body) }
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        throw new Error('unexpected usage response')
+      }
+      const { usages, hasPlanData } = parseKimiUsages(body)
+      if (usages.length > 0) return { balances: null, usages }
+      // A body with no quota container at all is the endpoint's "no plan"
+      // answer (`{}` once a Kimi Code membership lapses), not zero usage:
+      // report the account state instead of an empty card. Data that parses to
+      // nothing is a genuine parse failure and must stay visible as one.
+      if (!hasPlanData) throw new NoActiveSubscriptionError()
+      throw new Error('no usage windows in the usage response')
     },
   },
 
@@ -963,6 +979,9 @@ export class UsageService extends TypertRemoteService {
    */
   private codexReauth: { refreshToken: string; message: string; until: number } | undefined
 
+  /** Latched so a host-seam report lands once per process, not once per poll. */
+  private hostSeamsProbed = false
+
   constructor(ctx: Context, options: () => ProviderUsageConfig) {
     super(ctx, 'usage')
     this.options = options
@@ -973,6 +992,7 @@ export class UsageService extends TypertRemoteService {
    * @param signal - optional cancellation signal carried over the RPC carrier.
    */
   async list(signal?: AbortSignal): Promise<UsageListResult> {
+    this.reportMissingHostSeams()
     const specs = await this.collectSpecs()
     const activeProviderId = this.currentProviderId()
     const providers = await Promise.all(specs.map((spec) => this.fetchProvider(spec, activeProviderId, signal)))
@@ -984,6 +1004,33 @@ export class UsageService extends TypertRemoteService {
       version,
       providers,
     }
+  }
+
+  /**
+   * Name the host seams this runtime no longer provides, once per process.
+   *
+   * The probe runs on the first query rather than at mount: Cordis provisions
+   * services asynchronously, so `apply` can legitimately run before `llm` or
+   * `credentials` exists, and judging them there would condemn a healthy
+   * composition. By the first poll they are settled, so this line is what tells
+   * a later reader that a card reading "no API key configured" actually meant
+   * "this host has no credentials service" (see {@link missingHostSeams}).
+   */
+  private reportMissingHostSeams(): void {
+    if (this.hostSeamsProbed) return
+    this.hostSeamsProbed = true
+    const read = (name: string): unknown => {
+      try {
+        return this.ctx.get(name)
+      } catch {
+        return undefined
+      }
+    }
+    const missing = missingHostSeams({ credentials: read('credentials'), llm: read('llm') })
+    if (missing.length === 0) return
+    this.ctx.logger?.warn?.(
+      `provider-usage: this dsh provides no ${missing.join(', ')}; quota queries stay degraded until it does`,
+    )
   }
 
   /**
@@ -1010,7 +1057,15 @@ export class UsageService extends TypertRemoteService {
       const settings = this.ctx.get('settings')
       const routes: Array<{ id: string; name: string }> = llm?.listProviders?.() ?? []
       for (const route of routes) {
-        specs.push(await this.resolveRoute(route, settings, llm))
+        const spec = await this.resolveRoute(route, settings, llm)
+        // `listProviders` reports every route with a registered adapter, and the
+        // account route is composed by its bundle unconditionally — so a
+        // deployment that never signed in still lists it beside the routes it
+        // actually uses. Skip it while no grant is stored; the card returns on
+        // the poll after the sign-in (see {@link isUnusedAccountRoute}).
+        const kind = 'unsupported' in spec ? undefined : spec.kind
+        if (await isUnusedAccountRoute(kind, () => this.resolveDeepSeekAccountGrant())) continue
+        specs.push(spec)
       }
     }
     for (const extra of options.providers) {
@@ -1049,6 +1104,17 @@ export class UsageService extends TypertRemoteService {
     const known = KNOWN_ROUTES[route.id]
     let baseURL: string | undefined
     let apiKeyEnv: string | undefined
+    if (route.id === 'deepseek-account') {
+      // dsh ≥ 0.1.7 composes this route from the account platform's stored
+      // grant: no apiKeyEnv and no section baseURL. Classify it by route id
+      // alone — the adapter talks to the grant's issuer, not this baseURL.
+      return {
+        id: route.id,
+        displayName: route.name || known?.displayName || route.id,
+        kind: 'deepseek-account',
+        baseURL: known?.baseURL ?? 'https://platform.deepseek.com',
+      }
+    }
     if (route.id === 'deepseek-official') {
       const section = await this.readSection(settings, 'llm-deepseek')
       baseURL = section?.baseURL ?? launchEnvironmentOf(this.ctx).get('DEEPSEEK_BASE_URL')?.value ?? known?.baseURL
@@ -1126,6 +1192,22 @@ export class UsageService extends TypertRemoteService {
     }
   }
 
+  /**
+   * Read the DeepSeek Account grant the harness's account platform persists
+   * after the browser PKCE sign-in (`deepseek-account-platform/default`). The
+   * token is long-lived and replaced only by another sign-in — there is no
+   * refresh — so resolution is a plain record read. The grant's `issuer` (the
+   * configured platformOrigin) travels with the token because the balance
+   * endpoint answers only there.
+   */
+  private async resolveDeepSeekAccountGrant(): Promise<DeepSeekAccountGrant | undefined> {
+    const credentials = this.ctx.get('credentials') as DeepSeekAccountRecordStore | undefined
+    if (credentials === undefined) return undefined
+    const record = await credentials.readRecord(DEEPSEEK_ACCOUNT_CREDENTIAL_KEY)
+    if (record === undefined || record.kind !== 'grant') return undefined
+    return parseDeepSeekAccountGrant(record.payload) ?? undefined
+  }
+
   private async fetchProvider(spec: DetectedProvider, activeProviderId: string | null, outerSignal?: AbortSignal): Promise<ProviderUsageView> {
     if ('unsupported' in spec) {
       return failView(spec.route.id, spec.route.name || spec.route.id, null, 'unsupported', spec.route.id, spec.route.id === activeProviderId)
@@ -1182,6 +1264,18 @@ export class UsageService extends TypertRemoteService {
             return failView(spec.id, spec.displayName, adapter.view, 'missing-authorization', 'llm-pi-ai/openai-codex', active)
           }
           apiKey = current.access
+        } else if (spec.kind === 'deepseek-account') {
+          // The account grant lives in the credential records under the
+          // platform provider's key; the token is not refreshable, so a dead
+          // sign-in surfaces as reauth-required rather than a doomed retry.
+          // The grant's issuer travels via `credentials` — the balance
+          // endpoint answers only at the platformOrigin that issued the token.
+          const grant = await this.resolveDeepSeekAccountGrant()
+          if (grant === undefined) {
+            return failView(spec.id, spec.displayName, adapter.view, 'missing-authorization', 'DeepSeek Account', active)
+          }
+          apiKey = grant.token
+          credentials = [grant.issuer]
         } else {
           const resolved = await this.resolveApiKey(spec.apiKeyEnv!)
           if (resolved === undefined) {
@@ -1198,6 +1292,12 @@ export class UsageService extends TypertRemoteService {
         // what a human must do, and never retry it into the token endpoint.
         if (error instanceof OpenAiCodexReauthRequiredError) {
           return failView(spec.id, spec.displayName, adapter.view, 'reauth-required', message, active)
+        }
+        if (error instanceof DeepSeekAccountAuthRequiredError) {
+          return failView(spec.id, spec.displayName, adapter.view, 'reauth-required', message, active)
+        }
+        if (error instanceof NoActiveSubscriptionError) {
+          return failView(spec.id, spec.displayName, adapter.view, 'no-subscription', null, active)
         }
         if (attempt >= maxAttempts || !isTransientQueryError(error)) {
           return failView(spec.id, spec.displayName, adapter.view, 'error', message, active)
